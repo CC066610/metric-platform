@@ -240,6 +240,37 @@ rollback and no `ON CONFLICT` or `RETURNING` on this path.
 window. Pulling raw points into the JVM to average them would move the entire
 window over the wire on every evaluation.
 
+**Why detection is not a separate service.** Anomaly scoring is one aggregate
+inside the database:
+
+```sql
+SELECT avg(value), stddev_pop(value), count(*) FROM metric_point
+WHERE metric_name = ? AND ts >= now() - (? * INTERVAL '1 second')
+```
+
+At the measured 0.112 ms per rule it returns three numbers. A detection process in
+another runtime answering the same question over HTTP would compute the same
+mean and standard deviation, then add a round trip, a second process to keep
+running, a new failure mode, and a second owner for a decision the state machine
+already owns. Same capability, strictly more that can break.
+
+Extracting detection becomes worthwhile when it adds an analysis the database
+cannot express or the current approach cannot perform:
+
+- a seasonal baseline, so a metric with a daily shape stops producing false
+  positives during its own peak. That needs several weeks of continuous history
+  to fit and to validate against; the collector here has been running for about
+  a day, so building it now would mean validating it against generated data,
+  which proves only that the generator is periodic.
+- change-point detection or drift estimation, where the question is when a level
+  shifted rather than whether one sample is far from a mean.
+- cross-metric attribution, which needs labelled incidents that this deployment
+  has not produced.
+
+Those are the conditions to revisit. The current shortfall is stated under
+limitations rather than worked around with machinery that cannot be shown to
+help.
+
 ## Measured behaviour
 
 Numbers below were produced on this machine (PostgreSQL 17.11, Windows) and are
@@ -311,24 +342,35 @@ Full methodology and the interview-relevant trade-offs:
 server's own bulk path with no client involved, so it bounds what any client-side
 path can reach on this hardware.
 
-**Read amplification** — the same seven-day window:
+**Read amplification** — 23,768 stored points, 11 metrics, measured with
+`EXPLAIN (ANALYZE)` on `cpu.usage`:
 
-| query shape | rows returned | time |
-| --- | --- | --- |
-| raw scan, no bucketing | 60,479 rows | 13.9 ms |
-| bucketed at 300 s | 289 rows | 4.4 ms |
+| query shape | rows the plan touches | rows returned | server time |
+| --- | ---: | ---: | ---: |
+| raw scan over 7 days | 3,048 | 3,048 | 1.14 ms |
+| bucketed at 300 s over 24 h | 1,666 | 62 | 2.44 ms |
 
-The win is the row count, not the milliseconds: 60,479 points become 289 points,
-which is what keeps the browser fast.
+The win is the row count that reaches the client, not the milliseconds: the
+bucketed query reads more rows in total (a wider window) while returning 62 of
+them instead of 1,666. A chart renders 62 points, and the browser never sees the
+other 1,604.
 
-**Index usage** — `EXPLAIN (ANALYZE)` on the bucketed range scan shows
-`Bitmap Index Scan on idx_metric_point_name_ts`, so the composite index is
-actually used rather than merely present.
+An earlier benchmark on a synthetic 100,000 point dataset showed the same effect
+at a larger scale: 60,479 raw rows became 289 buckets. Those figures describe
+that dataset, which the benchmark script rebuilds on demand and then drops. The
+numbers above are the ones the current data reproduces.
 
-**Statistical baseline** — mean and population standard deviation over a ten
-minute window (59 samples) computed in **0.27 ms**: mean 136.015, stddev 10.837,
-three-sigma bound 168.527. At that cost the baseline can be recomputed on every
-evaluation pass.
+**Index usage** — both plans above use `Bitmap Index Scan on
+idx_metric_point_name_ts` and neither falls back to a sequential scan, so the
+composite index is actually used rather than merely present.
+
+**Statistical baseline** — mean and population standard deviation over a 300
+second window (**29 samples**) in **0.112 ms** of server execution. At that cost
+the baseline is recomputed on every evaluation pass rather than cached, and there
+is no reason to move it out of the database. Note that a client-side `psql`
+round trip for the same statement reports about 8 ms; that figure measures the
+connection, not the query, which is why the plan's own execution time is the one
+quoted here.
 
 **Alert state machine** — the full lifecycle, observed through the HTTP API:
 
