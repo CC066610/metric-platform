@@ -4,7 +4,11 @@ spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://127.0.0.1:5432/metrics}
     username: ${DB_USER:metrics}
-    password: ${DB_PASSWORD:metrics}
+    # No default. This repository is public, so a default written here is not a
+    # fallback — it is the password actually in use on every machine that never
+    # overrode it, and it is readable by anything that can open the source,
+    # including a dependency's install script. Starting up must fail instead.
+    password: ${DB_PASSWORD}
     hikari:
       maximum-pool-size: 10
       pool-name: metric-pool
@@ -78,5 +82,10 @@ metric-platform:
     # and printed at startup, so the API is never reachable without a credential.
     dashboard-user: ${DASHBOARD_USER:dashboard}
     dashboard-password: ${DASHBOARD_PASSWORD:}
+    # Failed logins are counted per client address; an address that exceeds this
+    # is refused with 429 until the window drains. Without a limit the operator
+    # password can be guessed as fast as the network allows.
+    max-auth-failures: ${AUTH_MAX_FAILURES:10}
+    auth-failure-window-seconds: ${AUTH_FAILURE_WINDOW_SECONDS:900}
   cors:
     allowed-origins: http://localhost:5173

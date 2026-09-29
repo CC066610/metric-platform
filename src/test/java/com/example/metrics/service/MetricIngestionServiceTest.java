@@ -21,7 +21,7 @@ class MetricIngestionServiceTest {
         7, 10_000, 300,
         new MetricPlatformProperties.Ingestion(copyMinBatchSize, forcePath),
         new MetricPlatformProperties.Alerts(true, 30_000, "", "metrics@localhost"),
-        new MetricPlatformProperties.Security(null, null, null),
+        new MetricPlatformProperties.Security(null, null, null, 0, 0),
         new MetricPlatformProperties.Cors(""));
     return new MetricIngestionService(null, null, properties);
   }

@@ -50,7 +50,10 @@ public final class WritePathBenchmark {
 
     String url = env("DB_URL", "jdbc:postgresql://127.0.0.1:5432/metrics");
     String user = env("DB_USER", "metrics");
-    String password = env("DB_PASSWORD", "metrics");
+    // Same rule as application.yml: no published default. A benchmark that fell
+    // back to a committed credential would keep a weak value alive after the
+    // application itself stopped accepting one.
+    String password = requiredEnv("DB_PASSWORD");
     // Set BENCH_REWRITE_BATCHED_INSERTS to true or false to control the driver's
     // INSERT rewriting. The default behaviour of the driver is measured when the
     // variable is absent, which is what a production deployment gets.
@@ -172,6 +175,26 @@ public final class WritePathBenchmark {
   private static String env(String name, String fallback) {
     String value = System.getenv(name);
     return value == null || value.isBlank() ? fallback : value;
+  }
+
+  /**
+   * Reads a variable that has no acceptable default.
+   *
+   * @param name environment variable name
+   * @return the value
+   * @throws IllegalStateException when the variable is unset or blank
+   */
+  private static String requiredEnv(String name) {
+    String value = System.getenv(name);
+    if (value == null || value.isBlank()) {
+      throw new IllegalStateException(
+          name
+              + " is not set. The benchmark connects with the same credential as the "
+              + "platform, which has no default: set "
+              + name
+              + " before running it.");
+    }
+    return value;
   }
 
   /** Inserts one chunk; the only difference between the two measured paths. */

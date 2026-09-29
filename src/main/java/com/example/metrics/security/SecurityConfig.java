@@ -2,6 +2,7 @@ package com.example.metrics.security;
 
 import com.example.metrics.config.MetricPlatformProperties;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.Base64;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +35,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * cookie, so no request carries authority the caller did not deliberately
  * attach. That is the precondition CSRF protection defends, and its absence is
  * why the filter is disabled here rather than an oversight.
+ *
+ * <p>The same page throttles failed logins per client address: a static password
+ * with no limit is guessable as fast as the network allows, and it is the only
+ * thing standing between a caller and the data.
  */
 @Configuration
 @EnableWebSecurity
@@ -42,6 +47,14 @@ public class SecurityConfig {
   private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
 
   private static final String DEFAULT_DASHBOARD_USER = "dashboard";
+
+  /** Ten failed logins per quarter hour is well under the usual 100/hour ceiling. */
+  private static final int DEFAULT_MAX_AUTH_FAILURES = 10;
+
+  private static final Duration DEFAULT_AUTH_FAILURE_WINDOW = Duration.ofMinutes(15);
+
+  /** Engages only under attack: far above the distinct clients one process sees. */
+  private static final int MAX_TRACKED_CLIENTS = 10_000;
 
   @Bean
   SecurityFilterChain filterChain(HttpSecurity http, MetricPlatformProperties properties)
@@ -83,9 +96,17 @@ public class SecurityConfig {
                     .anyRequest()
                     .hasRole("OPERATOR"))
         .httpBasic(Customizer.withDefaults())
-        // Built inline rather than exposed as a bean: a Filter bean is also
-        // picked up by Boot's servlet filter registration, which would run it a
-        // second time outside this chain.
+        // Both are built inline rather than exposed as beans: a Filter bean is
+        // also picked up by Boot's servlet filter registration, which would run it
+        // a second time outside this chain. The limiter is registered first so it
+        // runs first, and a refused client never reaches an authentication attempt.
+        .addFilterBefore(
+            new AuthFailureLimiterFilter(
+                new AuthFailureLimiter(
+                    security.maxAuthFailures(),
+                    Duration.ofSeconds(security.authFailureWindowSeconds()),
+                    MAX_TRACKED_CLIENTS)),
+            UsernamePasswordAuthenticationFilter.class)
         .addFilterBefore(
             new ApiKeyAuthenticationFilter(security.apiKey()),
             UsernamePasswordAuthenticationFilter.class);
@@ -143,7 +164,20 @@ public class SecurityConfig {
    */
   private static MetricPlatformProperties.Security security(MetricPlatformProperties properties) {
     MetricPlatformProperties.Security security = properties.security();
-    return security == null ? new MetricPlatformProperties.Security("", "", "") : security;
+    if (security == null) {
+      security = new MetricPlatformProperties.Security("", "", "", 0, 0);
+    }
+    // An omitted section binds the throttling knobs to zero, and "no failures
+    // allowed" would refuse every client including the operator. A missing value
+    // has to fall back to the default policy, never to a lockout.
+    return new MetricPlatformProperties.Security(
+        security.apiKey(),
+        security.dashboardUser(),
+        security.dashboardPassword(),
+        security.maxAuthFailures() > 0 ? security.maxAuthFailures() : DEFAULT_MAX_AUTH_FAILURES,
+        security.authFailureWindowSeconds() > 0
+            ? security.authFailureWindowSeconds()
+            : (int) DEFAULT_AUTH_FAILURE_WINDOW.toSeconds());
   }
 
   private static boolean isBlank(String value) {

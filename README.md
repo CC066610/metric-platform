@@ -144,34 +144,60 @@ and limitations: [agent/README.md](agent/README.md).
 - JDK 21
 - Node 20 or newer for the dashboard
 - Python 3.10 or newer plus psutil for the host agent
-- PostgreSQL 16 or newer, reachable as `metrics` / `metrics`
+- PostgreSQL 16 or newer, with a role and database the platform can reach
+  (`DB_PASSWORD` is required and has no default — see below)
 - Maven 3.9+ (or use the bundled wrapper once generated)
 
 ## Database setup
 
-The schema is applied automatically on startup from
-`src/main/resources/schema.sql`. To create the role and database first:
+`DB_PASSWORD` is required and has no default: without it the application fails
+to start. That is deliberate. This repository is public, so a password written
+here would not be a fallback — it would be the password actually in use on every
+clone that never overrode it, and it would be readable by anything that can open
+the source, including a dependency's install script. A default published in the
+repository is indistinguishable from no password at all.
+
+```bash
+export DB_PASSWORD='pick-something'
+```
+
+The role and database are not created for you:
 
 ```sql
-CREATE USER metrics WITH PASSWORD 'metrics';
+CREATE USER metrics WITH PASSWORD 'pick-something';
 CREATE DATABASE metrics OWNER metrics;
 ```
+
+`psql` needs the same value:
+`PGPASSWORD="$DB_PASSWORD" psql -U metrics -h 127.0.0.1 -d metrics`. The schema is
+applied automatically on startup from `src/main/resources/schema.sql`.
 
 ## Run
 
 ```bash
+export DB_PASSWORD='pick-something'          # required; no default, see Database setup
 export DASHBOARD_PASSWORD='pick-something'   # optional; generated at startup if unset
 export METRICS_API_KEY='pick-something'      # optional; unset accepts loopback writes only
 export ALERT_MAIL_TO=you@example.com         # optional; empty disables mail delivery
+export AUTH_MAX_FAILURES=10                  # optional; failed logins per address per window
+export AUTH_FAILURE_WINDOW_SECONDS=900       # optional; length of that window
 mvn spring-boot:run
 ```
 
-Override the datasource with `DB_URL`, `DB_USER`, and `DB_PASSWORD`.
+`DB_URL` and `DB_USER` still carry local defaults
+(`jdbc:postgresql://127.0.0.1:5432/metrics` and `metrics`); override them if your
+instance lives elsewhere.
 
 The dashboard asks for `DASHBOARD_USER` (default `dashboard`) and
 `DASHBOARD_PASSWORD` on first load. When `DASHBOARD_PASSWORD` is unset the
 platform generates one, logs it once at WARN, and uses it — so an unconfigured
 instance is reachable only by someone who can read its log, never by nobody.
+
+Failed logins are counted per client address. An address that reaches
+`AUTH_MAX_FAILURES` (default 10) within `AUTH_FAILURE_WINDOW_SECONDS` (default
+900) is refused with `429` and a `Retry-After` header until the oldest counted
+failure leaves the window. Only requests that present a credential are counted,
+so a health probe and an anonymous flood are never throttled.
 
 ## Verify
 
@@ -278,6 +304,25 @@ expiry and revocation to solve a problem it does not have. OAuth2 fits corporate
 SSO, and its client-credentials flow is a renamed static secret, so it does not
 even help the collector. Both are defensible in a system with those constraints;
 neither is here.
+
+**Why failed logins are counted per address, not per account.** Counting per
+account hands an attacker a lockout: type the operator's username with a wrong
+password often enough and the real operator is refused, which turns the throttle
+itself into the denial of service it exists to prevent. An address is the thing
+that must keep guessing, so the address is what gets throttled.
+
+**Why a throttled request is refused immediately instead of delayed.** Sleeping
+holds a request thread for the attacker's benefit; at a handful of requests per
+second that is a cheaper way to exhaust the pool than any password guess. The
+`Retry-After` header says when the window will have drained, so an honest client
+learns the same thing without the server spending a thread on it.
+
+**Why only requests that carry a credential are counted.** A request with no
+credential cannot guess anything, and counting them would let an unauthenticated
+flood throttle `/actuator/health` — the exact endpoint a load balancer polls, so
+the throttle would drain healthy instances out of rotation. A valid credential
+with the wrong role is a `403`, not a failed authentication, and is likewise not
+counted.
 
 **Why consecutive breaches and cooldown are separate knobs.**
 `minConsecutive` filters transient spikes before anything is sent. `cooldown`
@@ -467,6 +512,14 @@ History after the run held exactly two rows, one `FIRING` and one `RESOLVED`.
 - **Authenticated, not authorised per resource.** Every operator sees every
   metric and every rule. There are no per-tenant boundaries because the system
   holds one host's data, and inventing them would be structure without a user.
+- **The login throttle lives in one process's memory.** A restart clears it, two
+  instances behind a load balancer each keep their own count so the effective
+  limit multiplies, and behind a reverse proxy every caller arrives with the
+  proxy's address — one attacker's failures then throttle the real operator as
+  well. `X-Forwarded-For` is deliberately not trusted, since a client can set it,
+  and a forged header would let an attacker either escape the limit or pin it on
+  someone else. A deployment that needs this to hold should limit at the proxy
+  and treat the application's own count as a second line rather than the first.
 - **The three-sigma bound only holds for a stationary metric, and how badly it
   breaks is measurable.** `scripts/analyse_sigma_fpr.py` scores both detectors on
   the collector's own data: a fixed bound, and `mean + 3 sigma` over the preceding

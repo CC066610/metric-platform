@@ -76,8 +76,15 @@ public record MetricPlatformProperties(
    * @param dashboardUser login accepted by the read and rule-management endpoints
    * @param dashboardPassword login accepted by the read and rule-management
    *     endpoints; blank generates a password for this run and logs it
+   * @param maxAuthFailures failed logins from one address before it is refused
+   * @param authFailureWindowSeconds how far back a failed login still counts
    */
-  public record Security(String apiKey, String dashboardUser, String dashboardPassword) {
+  public record Security(
+      String apiKey,
+      String dashboardUser,
+      String dashboardPassword,
+      int maxAuthFailures,
+      int authFailureWindowSeconds) {
 
     /**
      * Whether an API key was configured.

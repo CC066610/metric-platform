@@ -35,6 +35,9 @@ jobs:
         env:
           POSTGRES_DB: metrics
           POSTGRES_USER: metrics
+          # Throwaway container on a runner that is discarded when the job ends,
+          # so this is not a deployment default: nothing in the repository points
+          # here unless a job sets DB_PASSWORD explicitly.
           POSTGRES_PASSWORD: metrics
         ports:
           - 5432:5432
@@ -56,9 +59,10 @@ jobs:
           cache: maven
 
       - name: Compile and run tests
-        # application.yml reads DB_URL/DB_USER/DB_PASSWORD with these same
-        # values as defaults, so no override is needed; the service container
-        # publishes 5432 on localhost exactly where the default points.
+        # These are unit tests and start no Spring context, so no datasource is
+        # involved and DB_PASSWORD is deliberately not set for this step. It has
+        # no default any more (application.yml), so a test that started needing
+        # a database would fail here and say so rather than connect silently.
         run: mvn -B test
 
       - name: Verify the schema script is idempotent on a fresh database
