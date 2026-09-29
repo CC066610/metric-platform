@@ -35,6 +35,16 @@ management:
     web:
       exposure:
         include: health,info,metrics
+  health:
+    mail:
+      # Alert delivery is optional, and MAIL_HOST is unset by default, so this
+      # indicator would report DOWN on a perfectly healthy instance: the whole
+      # health endpoint would answer 503 and a load balancer would take the
+      # instance out of rotation because it cannot send email. Whether the
+      # platform is live must not depend on a notification channel. Set
+      # MANAGEMENT_HEALTH_MAIL_ENABLED=true when mail delivery is part of the
+      # deployment's contract.
+      enabled: ${MANAGEMENT_HEALTH_MAIL_ENABLED:false}
 
 metric-platform:
   # Improvement C: retention. Without this the demo data set grows without
