@@ -427,6 +427,42 @@ History after the run held exactly two rows, one `FIRING` and one `RESOLVED`.
   briefly, so a trailing mean and standard deviation fitted during an idle
   stretch describe nothing about the burst that follows.
 
+  `scripts/explain_sigma_fpr.py` attributes every alarm to a mechanism by
+  reconstructing the bound that produced it and comparing that bound with the
+  metric's own spread over the whole record. The two metric classes fail for
+  different reasons, and the numbers make the difference plain:
+
+  | metric | alarms | bound below the record's own std | median bound, as a fraction of that std |
+  | --- | ---: | ---: | ---: |
+  | `cpu.usage` (30 min) | 20 | 13 | 0.753 |
+  | `net.recv.bytes_per_sec` (60 min) | 22 | **22** | **0.006** |
+
+  For `cpu.usage` the detector is approximately right: the bound usually lands
+  within the metric's normal spread, and the alarms cluster where a quiet
+  half hour made the trailing window unrepresentative. A recorded example fired
+  at 47.2% whose preceding window held a mean of 11.7 and a standard deviation of
+  11.2, giving a bound of 45.2 — above the values in its own window, but well
+  below the roughly 65% the metric reaches during a build. The sample was
+  unremarkable for the host; the baseline was unrepresentative of it.
+
+  For `net.recv.bytes_per_sec` the detector is not working at all. Every one of
+  22 alarms had a bound below the record's standard deviation, and the median
+  bound sat at 0.6% of it. One recorded alarm fired at 67 MB/s against a bound of
+  115 kB/s, because the preceding 60 minutes held a mean of 3.2 kB/s: the metric
+  had been idle for almost the whole window with a single modest upload in it.
+  That detector was not distinguishing an anomaly from normal traffic; it was
+  firing on traffic.
+
+  The underlying point is that a trailing window answers "is this point unusual
+  compared with the last N minutes", which is only the same question as "is this
+  point unusual for this system" when the metric is stationary. Throughput
+  violates that: bursts last seconds while idle stretches last minutes to hours,
+  so a window either misses bursts entirely and reports an idle baseline, or
+  contains one and takes its variance from that single event. Lengthening the
+  window is not a fix — it trades a bound that is too low for one that adapts too
+  slowly to a genuine level change. The two-state structure needs a detector with
+  two states, not one mean and one standard deviation.
+
   The practical consequence, and the reason no throughput rule is shipped:
   adding an I/O or network rule with either detector buys roughly ten notifications
   per five hours with no evidence that any of them is a fault. The data contains
