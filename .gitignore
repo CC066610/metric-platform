@@ -15,3 +15,7 @@ tools/captured/
 # Recording workspace: raw video, QA frames, and the encoded GIF stay local.
 # Binary media must never be committed to a branch.
 .playwright-mcp/
+# Local launcher: it holds the credentials this repository deliberately does not
+# ship (DB_PASSWORD has no default, DASHBOARD_PASSWORD is generated per boot
+# when unset). Ignored so that a careless `git add -A` cannot put them back.
+run-local.ps1
