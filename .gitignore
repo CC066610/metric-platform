@@ -1,0 +1,17 @@
+target/
+*.class
+*.log
+.idea/
+*.iml
+.vscode/
+.env
+# Python bytecode: matched anywhere, not only in the directories enumerated
+# below, because a new script directory silently reintroduces the problem.
+__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+tools/captured/
+# Recording workspace: raw video, QA frames, and the encoded GIF stay local.
+# Binary media must never be committed to a branch.
+.playwright-mcp/

@@ -1,0 +1,16 @@
+# Normalise line endings in the repository to LF.
+#
+# Without this, a Windows checkout with core.autocrlf=true rewrites every file
+# to CRLF on commit, so a file touched on Windows and one touched on Linux show
+# as fully changed even when no line changed. Text is stored as LF; working
+# copies on Windows may still be CRLF.
+* text=auto eol=lf
+
+# Windows batch files must keep CRLF: cmd.exe mis-parses LF-only .bat files.
+*.bat text eol=crlf
+
+# Binary types must never be line-ending converted.
+*.png binary
+*.gif binary
+*.webm binary
+*.jar binary

@@ -1,0 +1,63 @@
+spring:
+  application:
+    name: metric-platform
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://127.0.0.1:5432/metrics}
+    username: ${DB_USER:metrics}
+    password: ${DB_PASSWORD:metrics}
+    hikari:
+      maximum-pool-size: 10
+      pool-name: metric-pool
+  sql:
+    init:
+      # schema.sql is idempotent (CREATE TABLE IF NOT EXISTS + guarded seeds),
+      # so re-running it on every startup is safe and keeps the repo cloneable
+      # without a migration tool.
+      mode: always
+      schema-locations: classpath:schema.sql
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:25}
+    username: ${MAIL_USER:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      # Without an explicit timeout a hung SMTP server blocks the notifier
+      # thread forever.
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+metric-platform:
+  # Improvement C: retention. Without this the demo data set grows without
+  # bound and week-7 latency measurements measure the wrong thing.
+  retention-days: 7
+  retention-batch-size: 10000
+  # A metric whose newest point is older than this is treated as stale and is
+  # skipped during evaluation: an agent that stopped reporting must not keep
+  # re-triggering alerts from its last sample.
+  max-point-age-seconds: 300
+  ingestion:
+    # Measured crossover between the two write paths, not a preference: at
+    # 100 rows per call COPY was 1.46x faster, at 1 row per call it was 0.67x.
+    copy-min-batch-size: 100
+    # auto (default) selects by batch size; copy or batch pin one path for
+    # benchmarking and for rolling back an ingestion change without a revert.
+    force-path: auto
+  alerts:
+    enabled: true
+    evaluation-interval-ms: 30000
+    # Improvement B: notifications leave the request path. Empty recipient
+    # disables delivery and keeps the transition logic observable in logs.
+    notify-to: ${ALERT_MAIL_TO:}
+    notify-from: ${ALERT_MAIL_FROM:metrics@localhost}
+  cors:
+    allowed-origins: http://localhost:5173
