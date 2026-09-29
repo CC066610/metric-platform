@@ -1,0 +1,11 @@
+# This directory holds one deliberate binary asset: demo.gif.
+#
+# The root .gitignore excludes *.gif and the whole .playwright-mcp/ recording
+# workspace, because raw video and QA frames must never enter history. This one
+# file is the exception: it is the demonstration the README embeds, it was
+# reviewed frame by frame, and it lives here rather than in the recording
+# workspace so the exclusion of that workspace stays absolute.
+#
+# Keep it the only binary under docs/. If it grows past a few megabytes,
+# re-encode it smaller instead of adding a second copy.
+!demo.gif

@@ -8,6 +8,14 @@ monitoring setups either page on every threshold crossing or never page at all;
 this one keeps a state machine per rule so a spike stays quiet, a sustained
 excursion notifies once, and a recovery notifies again.
 
+![Dashboard demonstration](docs/demo.gif)
+
+*Dashboard recorded against this repository's running stack. Playback is 2x;
+the raw recording is kept out of the repository. The chart shows a full day of
+one-minute samples; the alert transition at the end is the host's own measured
+CPU value breaching a rule created for the demonstration, evaluated by the
+shipped state machine.*
+
 ## What it does
 
 - **Ingestion**: `POST /api/metrics/batch` stores up to 1000 points per request,
