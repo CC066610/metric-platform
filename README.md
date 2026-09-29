@@ -1,5 +1,7 @@
 # metric-platform
 
+[![ci](https://github.com/CC066610/metric-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/CC066610/metric-platform/actions/workflows/ci.yml)
+
 Self-hosted metric collection with anomaly alerts, built as a single Spring Boot
 service on PostgreSQL.
 
