@@ -258,12 +258,19 @@ Extracting detection becomes worthwhile when it adds an analysis the database
 cannot express or the current approach cannot perform:
 
 - a seasonal baseline, so a metric with a daily shape stops producing false
-  positives during its own peak. That needs several weeks of continuous history
-  to fit and to validate against; the collector here has been running for about
-  a day, so building it now would mean validating it against generated data,
-  which proves only that the generator is periodic.
+  positives during its own peak. The measurement under limitations is what rules
+  this out for now: `cpu.usage` and `mem.usage` alarm at 1.7x and 4.4x the
+  stationary-Gaussian rate, with the window length barely changing the answer, so
+  there is no measured error left for a seasonal model to remove on the two
+  metrics a rule actually watches. A seasonal fit would also need several weeks
+  of continuous history to validate against; the collector has been running for
+  about a day, and validating against generated data would prove only that the
+  generator is periodic.
 - change-point detection or drift estimation, where the question is when a level
-  shifted rather than whether one sample is far from a mean.
+  shifted rather than whether one sample is far from a mean. This is the one gap
+  the measurement does identify: no single upper bound describes a throughput
+  metric whose `max / median` is five orders of magnitude, and both detectors
+  tested raised roughly ten notifications per five hours on those metrics.
 - cross-metric attribution, which needs labelled incidents that this deployment
   has not produced.
 
@@ -386,6 +393,49 @@ History after the run held exactly two rows, one `FIRING` and one `RESOLVED`.
 
 ## Known limitations and deferred work
 
+- **The three-sigma bound only holds for a stationary metric, and how badly it
+  breaks is measurable.** `scripts/analyse_sigma_fpr.py` scores both detectors on
+  the collector's own data: a fixed bound, and `mean + 3 sigma` over the preceding
+  window, using only prior samples so the value being judged never enters its own
+  baseline. A stationary Gaussian metric would alarm on 0.27% of samples.
+
+  | metric | window giving the lowest rate | rate | incidents | vs Gaussian | fixed bound: incidents |
+  | --- | --- | ---: | ---: | ---: | ---: |
+  | `cpu.usage` | 30 min | 0.45% | 8 | 1.7x | 0 |
+  | `mem.usage` | 30 min | 1.20% | 6 | 4.4x | 2 |
+  | `disk.write.bytes_per_sec` | 60 min | 0.89% | 8 | 3.3x | 6 |
+  | `disk.read.bytes_per_sec` | 60 min | 1.12% | 9 | 4.2x | 10 |
+  | `net.recv.bytes_per_sec` | 60 min | 1.30% | 6 | 4.8x | 11 |
+  | `net.sent.bytes_per_sec` | 30 min | 2.01% | 12 | 7.5x | 10 |
+
+  Two conclusions follow, and neither is the one the limitation used to assert:
+
+  - **For resource occupancy the assumption survives.** `cpu.usage` runs 1.7x the
+    Gaussian rate and `mem.usage` 4.4x, and the window length changes the answer
+    little. A statistical rule on these metrics is defensible at the traffic this
+    host produces, which is what the shipped rules rely on.
+  - **For throughput metrics no threshold works.** Every I/O and network metric
+    sits at 4-8x the Gaussian rate, and the fixed absolute bound does no better
+    (10, 11 and 10 incidents against the sigma detector's 9, 6 and 6). Reading
+    alarms per hour: 1,689 ten-second buckets is 4.7 hours of data, so
+    `net.recv` at 11 incidents is roughly two false alarms an hour. Neither bound
+    is at fault; the distribution is not one a single threshold describes.
+
+  Checking the burstiness explains the split. `max / median` is 2.5x for
+  `cpu.usage` but 4,520x for `disk.read.bytes_per_sec` and 131,086x for
+  `net.recv.bytes_per_sec`: throughput is idle most of the time and saturated
+  briefly, so a trailing mean and standard deviation fitted during an idle
+  stretch describe nothing about the burst that follows.
+
+  The practical consequence, and the reason no throughput rule is shipped:
+  adding an I/O or network rule with either detector buys roughly ten notifications
+  per five hours with no evidence that any of them is a fault. The data contains
+  no labelled incidents, so this measures false alarms only; it cannot show what
+  either detector would catch.
+
+  Reproduce with `python scripts/analyse_sigma_fpr.py`, which also writes the
+  full result as JSON.
+
 - **Single-writer ingestion.** No write batching daemon, no queue. Sustained
   ingestion above what one JDBC connection achieves would need an external
   buffer; the COPY path raises the ceiling but does not remove it.
@@ -403,9 +453,6 @@ History after the run held exactly two rows, one `FIRING` and one `RESOLVED`.
   counter) needs a larger value or it is skipped.
 - **The query response does not report the bucket width it chose.** A client
   cannot label the axis without re-deriving the tier from the span.
-- **Sigma bound assumes a roughly stationary metric.** A metric with a daily
-  cycle will produce false positives because the baseline window is a plain
-  mean, not a seasonal decomposition.
 - **No tag-based rule scoping.** Rules match a metric name only, so a rule
   cannot target `host=host-3` alone.
 - **No downsampling at rest.** Old points stay at full resolution until they
