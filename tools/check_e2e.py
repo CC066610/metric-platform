@@ -13,7 +13,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -22,6 +24,12 @@ from datetime import datetime, timedelta, timezone
 
 RESULTS: list[tuple[str, str, str]] = []
 
+# Filled in by main(). The dashboard credential and the agent key are separate
+# because the platform treats them as different callers; a check that wants to
+# see what an anonymous caller gets asks for neither.
+OPERATOR_AUTHORIZATION: str | None = None
+API_KEY: str | None = None
+
 
 def record(name: str, status: str, detail: str = "") -> None:
     RESULTS.append((name, status, detail))
@@ -29,10 +37,25 @@ def record(name: str, status: str, detail: str = "") -> None:
     print(f"  [{marker}] {name}" + (f" — {detail}" if detail else ""))
 
 
-def call(method: str, url: str, body: dict | None = None, timeout: int = 20):
-    """Perform one request, returning (status_code, parsed_body_or_text)."""
+def auth_headers(credentials: str | None) -> dict[str, str]:
+    """Headers for one of the two callers, or nothing for an anonymous request."""
+    if credentials == "operator" and OPERATOR_AUTHORIZATION:
+        return {"Authorization": OPERATOR_AUTHORIZATION}
+    if credentials == "agent" and API_KEY:
+        return {"X-API-Key": API_KEY}
+    return {}
+
+
+def call(method: str, url: str, body: dict | None = None, timeout: int = 20,
+         credentials: str | None = "operator"):
+    """Perform one request, returning (status_code, parsed_body_or_text).
+
+    Defaults to the operator credential because that is what most endpoints
+    need; pass credentials=None to see what an anonymous caller gets.
+    """
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
+    headers.update(auth_headers(credentials))
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -58,13 +81,57 @@ def iso(moment: datetime) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://127.0.0.1:8080")
+    parser.add_argument("--dashboard-user", default=os.environ.get("DASHBOARD_USER", "dashboard"),
+                        help="operator name; defaults to $DASHBOARD_USER")
+    parser.add_argument("--dashboard-password", default=os.environ.get("DASHBOARD_PASSWORD"),
+                        help="operator password; defaults to $DASHBOARD_PASSWORD")
+    parser.add_argument("--api-key", default=os.environ.get("METRICS_API_KEY"),
+                        help="agent key; defaults to $METRICS_API_KEY")
     args = parser.parse_args(argv)
+
+    global OPERATOR_AUTHORIZATION, API_KEY
+    API_KEY = args.api_key or None
+    if args.dashboard_password:
+        token = base64.b64encode(
+            f"{args.dashboard_user}:{args.dashboard_password}".encode("utf-8")).decode("ascii")
+        OPERATOR_AUTHORIZATION = f"Basic {token}"
+
     base = args.base.rstrip("/")
     now = datetime.now(timezone.utc)
 
-    print(f"target: {base}\n")
+    print(f"target: {base}")
+    if OPERATOR_AUTHORIZATION is None:
+        print("warning: no dashboard password given, so every authenticated check below will "
+              "report 401. Pass --dashboard-password or set $DASHBOARD_PASSWORD.")
+    print()
 
-    print("read endpoints")
+    print("authentication")
+    code, _ = call("GET", f"{base}/api/metrics/count", credentials=None)
+    record("anonymous read is refused", "PASS" if code == 401 else "FAIL", f"HTTP {code}")
+
+    code, _ = call("GET", f"{base}/actuator/health", credentials=None)
+    record("health probe needs no credential", "PASS" if code == 200 else "FAIL", f"HTTP {code}")
+
+    code, _ = call("GET", f"{base}/api/metrics/count")
+    record("operator credential is accepted", "PASS" if code == 200 else "FAIL", f"HTTP {code}")
+
+    # The batch endpoint belongs to the agent credential. With no key configured
+    # the platform accepts loopback ingestion, so there is nothing to assert.
+    probe = {"points": [{"name": "e2e.auth", "ts": iso(now), "value": 1.0, "tags": {}}]}
+    if API_KEY:
+        code, _ = call("POST", f"{base}/api/metrics/batch", probe, credentials=None)
+        record("ingest without a key is refused", "PASS" if code == 401 else "FAIL",
+               f"HTTP {code}")
+
+        code, _ = call("POST", f"{base}/api/metrics/batch", probe, credentials="operator")
+        record("operator credential cannot write metrics",
+               "PASS" if code == 403 else "FAIL", f"HTTP {code}")
+    else:
+        record("ingest without a key is refused", "SKIP",
+               "no API key configured: the platform accepts loopback ingestion")
+        record("operator credential cannot write metrics", "SKIP", "no API key configured")
+
+    print("\nread endpoints")
     code, body = call("GET", f"{base}/api/metrics/count")
     total_before = body.get("points") if isinstance(body, dict) else None
     if code == 200 and isinstance(total_before, int):
@@ -79,11 +146,16 @@ def main(argv: list[str] | None = None) -> int:
         record("GET /api/metrics/names", "FAIL", f"HTTP {code} {body}")
 
     print("\nwrite path routing (threshold is 100 rows)")
+    # The batch endpoint authenticates the agent, not the operator, so these
+    # writes carry the agent credential. With no key configured the platform
+    # accepts loopback ingestion and auth_headers("agent") is empty, which is
+    # why the same call works in both modes.
     stamp = iso(now)
     for rows, expected in ((3, "batch"), (100, "copy"), (500, "copy")):
         points = [{"name": "e2e.check", "ts": stamp, "value": 1.0,
                    "tags": {"host": "e2e"}} for _ in range(rows)]
-        code, body = call("POST", f"{base}/api/metrics/batch", {"points": points})
+        code, body = call("POST", f"{base}/api/metrics/batch", {"points": points},
+                          credentials="agent")
         got = body.get("route") if isinstance(body, dict) else None
         if code == 202 and got == expected and body.get("accepted") == rows:
             record(f"{rows} rows -> {expected}", "PASS", f"route={got} accepted={body['accepted']}")
@@ -131,7 +203,8 @@ def main(argv: list[str] | None = None) -> int:
         record("query on unknown metric returns empty list", "FAIL", f"HTTP {code} {body}")
 
     print("\nvalidation")
-    code, body = call("POST", f"{base}/api/metrics/batch", {"points": []})
+    code, body = call("POST", f"{base}/api/metrics/batch", {"points": []},
+                      credentials="agent")
     if code in (400, 422):
         record("empty batch rejected", "PASS", f"HTTP {code}")
     else:
@@ -139,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
 
     code, body = call("POST", f"{base}/api/metrics/batch",
                       {"points": [{"name": "e2e.check", "ts": "not-a-timestamp",
-                                   "value": 1.0, "tags": {}}]})
+                                   "value": 1.0, "tags": {}}]},
+                      credentials="agent")
     if code in (400, 422):
         record("malformed timestamp rejected", "PASS", f"HTTP {code}")
     else:

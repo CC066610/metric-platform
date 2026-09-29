@@ -36,6 +36,7 @@ import platform
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections import deque
@@ -93,6 +94,9 @@ class Config:
     timeout: float = 10.0
     verbose: bool = False
     disk_mounts: list[str] | None = None
+    # Sent as X-API-Key. Optional because a platform on this host accepts
+    # loopback ingestion without one; a remote platform requires it.
+    api_key: str | None = None
 
 
 def now_iso() -> str:
@@ -313,8 +317,19 @@ class Reporter:
                 # ordering, which this collector does not need at one batch per
                 # interval. The loss is counted and logged.
                 self._dropped += len(batch)
-                LOG.warning("send failed (%s), %d samples dropped, backoff %.0fs",
-                            failure, len(batch), backoff)
+                if isinstance(failure, urllib.error.HTTPError) and failure.code in (401, 403):
+                    # Rejection is not transient: every retry fails the same way,
+                    # so it must not be filed under routine send failures. An
+                    # agent that quietly stops reporting is worse than one that
+                    # never started, because the dashboards stay green.
+                    LOG.error(
+                        "platform rejected the credential (%s): set --api-key or "
+                        "METRICS_API_KEY. %d samples dropped and this host is NOT "
+                        "being monitored.",
+                        failure.code, len(batch))
+                else:
+                    LOG.warning("send failed (%s), %d samples dropped, backoff %.0fs",
+                                failure, len(batch), backoff)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 60.0)
 
@@ -330,10 +345,13 @@ class Reporter:
                 for s in batch
             ]
         }).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["X-API-Key"] = self.config.api_key
         request = urllib.request.Request(
             f"{self.config.url.rstrip('/')}/api/metrics/batch",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -356,6 +374,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true",
                         help="collect two readings, print them, send nothing")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--api-key", default=os.environ.get("METRICS_API_KEY"),
+                        help="sent as X-API-Key; defaults to $METRICS_API_KEY. Only "
+                             "needed when the platform is not on this host.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -372,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         queue_size=args.queue_size,
         verbose=args.verbose,
         disk_mounts=args.disk_mounts,
+        api_key=args.api_key,
     )
 
     sampler = HostSampler(config)

@@ -111,7 +111,15 @@ pip install psutil
 python agent/agent.py --once          # collect two readings and print them
 python agent/agent.py                 # collect every 10s against localhost:8080
 python agent/agent.py --url http://host:8080 --interval 5 --host web-01
+python agent/agent.py --api-key "$METRICS_API_KEY"   # against a remote platform
 ```
+
+A platform running on the same host accepts ingestion from loopback without a
+key, so the local agent needs no configuration. A platform anywhere else
+requires `--api-key`, or `METRICS_API_KEY` in the environment. If the key is
+wrong the agent logs the rejection at ERROR rather than filing it under routine
+send failures, because an agent that quietly stops reporting leaves the
+dashboard green while the host goes unmonitored.
 
 Apply the rules that match what it emits:
 
@@ -152,18 +160,28 @@ CREATE DATABASE metrics OWNER metrics;
 ## Run
 
 ```bash
-export ALERT_MAIL_TO=you@example.com   # optional; empty disables mail delivery
+export DASHBOARD_PASSWORD='pick-something'   # optional; generated at startup if unset
+export METRICS_API_KEY='pick-something'      # optional; unset accepts loopback writes only
+export ALERT_MAIL_TO=you@example.com         # optional; empty disables mail delivery
 mvn spring-boot:run
 ```
 
 Override the datasource with `DB_URL`, `DB_USER`, and `DB_PASSWORD`.
 
+The dashboard asks for `DASHBOARD_USER` (default `dashboard`) and
+`DASHBOARD_PASSWORD` on first load. When `DASHBOARD_PASSWORD` is unset the
+platform generates one, logs it once at WARN, and uses it — so an unconfigured
+instance is reachable only by someone who can read its log, never by nobody.
+
 ## Verify
 
+Reads need the operator credential and writes need the agent key.
+
 ```bash
-# store one point
+# store one point (agent credential)
 curl -s -X POST localhost:8080/api/metrics/batch \
   -H 'Content-Type: application/json' \
+  -H "X-API-Key: $METRICS_API_KEY" \
   -d '{"points":[{"name":"cpu.usage","ts":"2026-09-23T10:00:00Z","value":42.5,"tags":{"host":"h1"}}]}'
 # -> {"accepted":1}
 
@@ -171,29 +189,43 @@ curl -s -X POST localhost:8080/api/metrics/batch \
 python scripts/seed.py --minutes 120
 
 # aggregate (bucket width chosen automatically)
-curl -s "localhost:8080/api/metrics/query?name=http.latency.p95\
+curl -s -u "dashboard:$DASHBOARD_PASSWORD" "localhost:8080/api/metrics/query?name=http.latency.p95\
 &from=2026-09-23T00:00:00Z&to=2026-09-23T23:59:59Z" | head -c 400
 
 # alert state and history
-curl -s localhost:8080/api/alerts/status
-curl -s localhost:8080/api/alerts/events
+curl -s -u "dashboard:$DASHBOARD_PASSWORD" localhost:8080/api/alerts/status
+curl -s -u "dashboard:$DASHBOARD_PASSWORD" localhost:8080/api/alerts/events
 ```
+
+`tools/check_e2e.py` runs all of this against a live instance, including the
+rejections, and reports each check as PASS, FAIL or SKIP:
+
+```bash
+python tools/check_e2e.py --dashboard-password "$DASHBOARD_PASSWORD" --api-key "$METRICS_API_KEY"
+```
+
+It writes 603 probe points under `e2e.check` and leaves them in the database, so
+run it against a development instance rather than one you care about.
 
 ## API
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| POST | `/api/metrics/batch` | store up to 1000 points |
-| GET | `/api/metrics/query` | aggregate one metric over a range |
-| GET | `/api/metrics/names` | list metrics with point counts |
-| GET | `/api/metrics/count` | total stored points |
-| GET | `/api/metrics/ingestion` | last write path taken, threshold, and override |
-| GET | `/api/alerts/status` | current state of every rule |
-| GET | `/api/alerts/events` | alert history, newest first |
-| POST | `/api/alerts/rules` | create a rule |
-| POST | `/api/alerts/rules/{id}/enabled` | enable or disable a rule |
-| POST | `/api/alerts/rules/{id}/evaluate` | evaluate one rule now |
-| DELETE | `/api/alerts/rules/{id}` | delete a rule |
+Every path below requires the operator credential except `/actuator/health`,
+which is open so a load balancer can probe it.
+
+| Method | Path | Credential | Purpose |
+| --- | --- | --- | --- |
+| POST | `/api/metrics/batch` | agent key | store up to 1000 points |
+| GET | `/api/metrics/query` | operator | aggregate one metric over a range |
+| GET | `/api/metrics/names` | operator | list metrics with point counts |
+| GET | `/api/metrics/count` | operator | total stored points |
+| GET | `/api/metrics/ingestion` | operator | last write path taken, threshold, and override |
+| GET | `/api/alerts/status` | operator | current state of every rule |
+| GET | `/api/alerts/events` | operator | alert history, newest first |
+| POST | `/api/alerts/rules` | operator | create a rule |
+| POST | `/api/alerts/rules/{id}/enabled` | operator | enable or disable a rule |
+| POST | `/api/alerts/rules/{id}/evaluate` | operator | evaluate one rule now |
+| DELETE | `/api/alerts/rules/{id}` | operator | delete a rule |
+| GET | `/actuator/health` | none | liveness for a load balancer |
 
 ## Design decisions
 
@@ -212,6 +244,40 @@ consecutive count. Expressing that in a single SQL statement is possible but
 unreadable, and the decision logic is the part worth testing directly. It is a
 pure function over records, so `AlertStateMachineTest` covers the whole table
 without a database.
+
+**Why the dashboard uses Basic auth and the collector uses a header.** Two
+callers with different constraints: a browser session, and a machine that pushes
+on a timer. The browser gets `Authorization: Basic`, because anything the
+dashboard holds is visible to whoever opens it — a key compiled into the frontend
+is a published key. The collector gets `X-API-Key`, a static credential on a host
+the operator already controls.
+
+Both are request headers, and neither establishes a session, so there is no
+cookie for a cross-site request to ride on. That is why CSRF protection is
+disabled rather than merely tolerated: with no ambient credential there is
+nothing for it to protect. Turning it off is the conclusion, not a shortcut.
+
+**Why the two credentials are not interchangeable.** The batch endpoint requires
+`ROLE_AGENT` and everything else requires `ROLE_OPERATOR`, so a leaked dashboard
+password cannot forge metrics and a leaked collector key cannot read the
+dashboard or edit alert rules. `tools/check_e2e.py` asserts both directions —
+401 with no key, 403 with the operator credential — instead of only the happy
+path.
+
+**Why keys are compared in constant time, and why an unset key is not an open
+door.** A byte-by-byte comparison leaks the matching prefix length to anyone who
+can time the response; `MessageDigest.isEqual` closes that. With no key
+configured the platform accepts ingestion only from a loopback address, which
+keeps the local agent zero-configuration while leaving a remote attacker nothing
+to forge. An unset dashboard password is generated at startup and logged once, so
+"no configuration" never means "no authentication".
+
+**Why not JWT or OAuth2.** JWT solves stateless verification across services that
+do not share a session store; this is one process, so it would add signing keys,
+expiry and revocation to solve a problem it does not have. OAuth2 fits corporate
+SSO, and its client-credentials flow is a renamed static secret, so it does not
+even help the collector. Both are defensible in a system with those constraints;
+neither is here.
 
 **Why consecutive breaches and cooldown are separate knobs.**
 `minConsecutive` filters transient spikes before anything is sent. `cooldown`
@@ -393,6 +459,14 @@ History after the run held exactly two rows, one `FIRING` and one `RESOLVED`.
 
 ## Known limitations and deferred work
 
+- **Authentication is not encryption.** Basic credentials are base64, which is
+  reversible, and the API key crosses the wire in the clear. Over plain HTTP both
+  are readable by anyone on the path, so this is safe on a trusted network or
+  behind TLS and nowhere else. The platform does not terminate TLS itself; put it
+  behind a reverse proxy before it leaves the host.
+- **Authenticated, not authorised per resource.** Every operator sees every
+  metric and every rule. There are no per-tenant boundaries because the system
+  holds one host's data, and inventing them would be structure without a user.
 - **The three-sigma bound only holds for a stationary metric, and how badly it
   breaks is measurable.** `scripts/analyse_sigma_fpr.py` scores both detectors on
   the collector's own data: a fixed bound, and `mean + 3 sigma` over the preceding

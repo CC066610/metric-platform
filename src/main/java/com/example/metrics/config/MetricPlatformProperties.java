@@ -11,6 +11,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param maxPointAgeSeconds newest point age beyond which a metric is treated as stale
  * @param ingestion write path selection
  * @param alerts alert evaluation and delivery settings
+ * @param security credentials for the two kinds of caller
  * @param cors cross-origin settings for the dashboard dev server
  */
 @ConfigurationProperties(prefix = "metric-platform")
@@ -20,6 +21,7 @@ public record MetricPlatformProperties(
     int maxPointAgeSeconds,
     Ingestion ingestion,
     Alerts alerts,
+    Security security,
     Cors cors) {
 
   /**
@@ -58,6 +60,33 @@ public record MetricPlatformProperties(
       long evaluationIntervalMs,
       String notifyTo,
       String notifyFrom) {
+  }
+
+  /**
+   * Credentials for the two kinds of caller.
+   *
+   * <p>They are separate because they face different exposure. An agent runs on
+   * a host you control and can hold a long-lived key; the dashboard runs in a
+   * browser where anything shipped in the JavaScript is readable by whoever
+   * opens devtools, so it carries a credential the operator supplies at runtime
+   * instead.
+   *
+   * @param apiKey value agents present in the {@code X-API-Key} header; blank
+   *     restricts ingestion to loopback requests
+   * @param dashboardUser login accepted by the read and rule-management endpoints
+   * @param dashboardPassword login accepted by the read and rule-management
+   *     endpoints; blank generates a password for this run and logs it
+   */
+  public record Security(String apiKey, String dashboardUser, String dashboardPassword) {
+
+    /**
+     * Whether an API key was configured.
+     *
+     * @return true when agents must present a key
+     */
+    public boolean hasApiKey() {
+      return apiKey != null && !apiKey.isBlank();
+    }
   }
 
   /**

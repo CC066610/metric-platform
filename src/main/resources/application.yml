@@ -69,5 +69,14 @@ metric-platform:
     # disables delivery and keeps the transition logic observable in logs.
     notify-to: ${ALERT_MAIL_TO:}
     notify-from: ${ALERT_MAIL_FROM:metrics@localhost}
+  security:
+    # Agents present this value in the X-API-Key header. Blank accepts ingestion
+    # from loopback requests only, so a local agent needs no setup while a remote
+    # host still cannot inject metrics.
+    api-key: ${METRICS_API_KEY:}
+    # Login for reads and rule management. A blank password is generated per run
+    # and printed at startup, so the API is never reachable without a credential.
+    dashboard-user: ${DASHBOARD_USER:dashboard}
+    dashboard-password: ${DASHBOARD_PASSWORD:}
   cors:
     allowed-origins: http://localhost:5173

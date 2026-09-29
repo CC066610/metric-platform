@@ -8,8 +8,9 @@ export default defineConfig({
   server: {
     port: 5173,
     // Bound to localhost by default. Pass --host to expose the dashboard on the
-    // LAN (for checking it from a phone); do not do that on an untrusted network,
-    // the API has no authentication.
+    // LAN (for checking it from a phone). The API now requires credentials, but
+    // this proxy is plain HTTP, so the password would cross the network in
+    // base64 — readable, not encrypted. Do that only on a network you trust.
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8080',
